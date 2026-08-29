@@ -21,18 +21,53 @@ load_dotenv()
 AWS_REGION = os.getenv("AWS_REGION")
 SQS_QUEUE_URL = os.getenv("AWS_SQS_URL")
 DYNAMODB_TABLE_NAME = os.getenv("AWS_DYNAMODB_TABLE")
+DYNAMODB_ENDPOINT_URL = os.getenv("DYNAMODB_ENDPOINT_URL")
 
-if not all([AWS_REGION, SQS_QUEUE_URL, DYNAMODB_TABLE_NAME]):
-    log.critical("Erro: AWS_REGION, AWS_SQS_URL, e AWS_DYNAMODB_TABLE devem ser definidos.")
+if not all([AWS_REGION, DYNAMODB_TABLE_NAME]):
+    log.critical("Erro: AWS_REGION e AWS_DYNAMODB_TABLE devem ser definidos.")
     sys.exit(1)
+
+if not SQS_QUEUE_URL:
+    log.warning("AWS_SQS_URL não definida. Worker SQS será desabilitado.")
 
 # --- Clientes Boto3 ---
 # Criamos a sessão uma vez
 try:
     session = boto3.Session(region_name=AWS_REGION)
-    sqs_client = session.client("sqs")
-    dynamodb_client = session.client("dynamodb")
+
+    sqs_client = session.client("sqs") if SQS_QUEUE_URL else None
+
+    dynamodb_client = session.client(
+        "dynamodb",
+        endpoint_url=DYNAMODB_ENDPOINT_URL
+    )
+
     log.info(f"Clientes Boto3 inicializados na região {AWS_REGION}")
+
+    if DYNAMODB_ENDPOINT_URL:
+        log.info(f"Usando DynamoDB Local em {DYNAMODB_ENDPOINT_URL}")
+        try:
+            dynamodb_client.describe_table(TableName=DYNAMODB_TABLE_NAME)
+            log.info(f"Tabela {DYNAMODB_TABLE_NAME} já existe.")
+        except dynamodb_client.exceptions.ResourceNotFoundException:
+            dynamodb_client.create_table(
+                TableName=DYNAMODB_TABLE_NAME,
+                KeySchema=[
+                    {
+                        'AttributeName': 'event_id',
+                        'KeyType': 'HASH'
+                    }
+                ],
+                AttributeDefinitions=[
+                    {
+                        'AttributeName': 'event_id',
+                        'AttributeType': 'S'
+                    }
+                ],
+                BillingMode='PAY_PER_REQUEST'
+            )
+            log.info(f"Tabela {DYNAMODB_TABLE_NAME} criada no DynamoDB Local.")
+
 except NoCredentialsError:
     log.critical("Credenciais da AWS não encontradas. Verifique seu ambiente.")
     sys.exit(1)
@@ -48,10 +83,10 @@ def process_message(message):
     try:
         log.info(f"Processando mensagem ID: {message['MessageId']}")
         body = json.loads(message['Body'])
-        
+
         # Gera um ID único para o item no DynamoDB
         event_id = str(uuid.uuid4())
-        
+
         # Constrói o item no formato do DynamoDB
         item = {
             'event_id': {'S': event_id},
@@ -60,21 +95,21 @@ def process_message(message):
             'result': {'BOOL': body['result']},
             'timestamp': {'S': body['timestamp']}
         }
-        
+
         # Insere no DynamoDB
         dynamodb_client.put_item(
             TableName=DYNAMODB_TABLE_NAME,
             Item=item
         )
-        
+
         log.info(f"Evento {event_id} (Flag: {body['flag_name']}) salvo no DynamoDB.")
-        
+
         # Se tudo deu certo, deleta a mensagem da fila
         sqs_client.delete_message(
             QueueUrl=SQS_QUEUE_URL,
             ReceiptHandle=message['ReceiptHandle']
         )
-        
+
     except json.JSONDecodeError:
         log.error(f"Erro ao decodificar JSON da mensagem ID: {message['MessageId']}")
         # Não deleta a mensagem, pode ser uma "poison pill"
@@ -96,17 +131,17 @@ def sqs_worker_loop():
                 MaxNumberOfMessages=10,  # Processa em lotes de até 10
                 WaitTimeSeconds=20
             )
-            
+
             messages = response.get('Messages', [])
             if not messages:
                 # Nenhuma mensagem, continua o loop
                 continue
-                
+
             log.info(f"Recebidas {len(messages)} mensagens.")
-            
+
             for message in messages:
                 process_message(message)
-                
+
         except ClientError as e:
             log.error(f"Erro do Boto3 no loop principal do SQS: {e}")
             time.sleep(10) # Pausa antes de tentar novamente
@@ -130,9 +165,12 @@ def start_worker():
     worker_thread = threading.Thread(target=sqs_worker_loop, daemon=True)
     worker_thread.start()
 
-# Inicia o worker SQS em uma thread de background
-# Isso garante que ele inicie tanto com 'flask run' quanto com 'gunicorn'
-start_worker()
+# Inicia o worker SQS somente quando uma fila estiver configurada.
+# No Docker Compose local, o serviço pode rodar apenas com DynamoDB Local.
+if SQS_QUEUE_URL:
+    start_worker()
+else:
+    log.warning("Worker SQS não iniciado porque AWS_SQS_URL não foi definida.")
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 8005))
