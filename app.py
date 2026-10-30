@@ -1,14 +1,15 @@
+import json
+import logging
 import os
 import sys
 import threading
-import json
-import uuid
 import time
-import logging
+import uuid
+
 import boto3
-from botocore.exceptions import NoCredentialsError, ClientError
-from flask import Flask, jsonify
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 from dotenv import load_dotenv
+from flask import Flask, jsonify
 
 # Configura o logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -71,7 +72,7 @@ try:
 except NoCredentialsError:
     log.critical("Credenciais da AWS não encontradas. Verifique seu ambiente.")
     sys.exit(1)
-except Exception as e:
+except (BotoCoreError, ClientError, ValueError) as e:
     log.critical(f"Erro ao inicializar o Boto3: {e}")
     sys.exit(1)
 
@@ -116,7 +117,7 @@ def process_message(message):
     except ClientError as e:
         log.error(f"Erro do Boto3 (DynamoDB ou SQS) ao processar {message['MessageId']}: {e}")
         # Não deleta a mensagem, tenta novamente
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.error(f"Erro inesperado ao processar {message['MessageId']}: {e}")
         # Não deleta a mensagem, tenta novamente
 
@@ -145,7 +146,7 @@ def sqs_worker_loop():
         except ClientError as e:
             log.error(f"Erro do Boto3 no loop principal do SQS: {e}")
             time.sleep(10) # Pausa antes de tentar novamente
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             log.error(f"Erro inesperado no loop principal do SQS: {e}")
             time.sleep(10)
 
@@ -173,5 +174,5 @@ else:
     log.warning("Worker SQS não iniciado porque AWS_SQS_URL não foi definida.")
 
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 8005))
+    port = int(os.getenv("PORT", "8005"))
     app.run(host='0.0.0.0', port=port, debug=False)
